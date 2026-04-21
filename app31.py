@@ -66,7 +66,7 @@ def style_plotly(fig):
 @st.cache_data(ttl=86400)
 def load_market_data(bench_ticker="^IXIC"):
     # 12 Activos: Los originales 10 + GLD + SGOV (ahora sin IBTA, entra TTD)
-    assets = ["COST", "WMT", "NVDA", "AAPL", "TTD", "NEE", "JPM", "V", "DUK", "VSAT", "GLD", "SGOV"]
+    assets = ["VSAT", "PTEN", "HL", "CDE", "ICHR", "WMT", "BAX", "AVGO", "JPM", "GLD", "SGOV"]
     tkrs = assets + [bench_ticker]
     end = datetime.today()
     start = end - timedelta(days=2*365)
