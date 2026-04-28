@@ -65,18 +65,40 @@ def style_plotly(fig):
 # ==========================================
 @st.cache_data(ttl=86400)
 def load_market_data(bench_ticker="^IXIC"):
-    # 11 Activos solicitados por el usuario
     assets = ["VSAT", "PTEN", "HL", "CDE", "ICHR", "WMT", "BAX", "AVGO", "JPM", "GLD", "SGOV"]
     tkrs = assets + [bench_ticker]
     end = datetime.today()
     start = end - timedelta(days=2*365)
-    data = yf.download(tkrs, start=start, end=end, progress=False)['Close'].ffill().dropna()
     
-    # Separación rigurosa: Simples para suma ponderada y Markowitz, Logarítmicos para Estocásticos
-    simple_returns = data.pct_change().dropna()
-    log_returns = np.log(data / data.shift(1)).dropna()
-    
-    return simple_returns, log_returns, data, assets
+    # Descarga con manejo de errores
+    try:
+        df = yf.download(tkrs, start=start, end=end, progress=False)
+        if df.empty:
+            st.error("Error: No se pudieron descargar datos de Yahoo Finance. Reintenta en unos minutos.")
+            st.stop()
+            
+        # Manejo de MultiIndex en Close (común en versiones nuevas de yfinance)
+        if 'Close' in df.columns:
+            data = df['Close']
+        else:
+            # Fallback por si Close no es el primer nivel
+            data = df.xs('Close', axis=1, level=0) if isinstance(df.columns, pd.MultiIndex) else df
+            
+        data = data.ffill().dropna()
+        
+        # Verificar que todos los activos estén presentes
+        missing = [a for a in assets if a not in data.columns]
+        if missing:
+            st.warning(f"Advertencia: No hay datos para {missing}. Se omitirán del análisis.")
+            assets = [a for a in assets if a in data.columns]
+            
+        simple_returns = data[assets + [bench_ticker]].pct_change().dropna()
+        log_returns = np.log(data[assets + [bench_ticker]] / data[assets + [bench_ticker]].shift(1)).dropna()
+        
+        return simple_returns, log_returns, data[assets], assets
+    except Exception as e:
+        st.error(f"Fallo crítico en la descarga: {e}")
+        st.stop()
 
 def geometric_brownian_motion(S0, mu, sigma, T=1, N=252, paths=50):
     dt = T/N
