@@ -65,14 +65,18 @@ def style_plotly(fig):
 # ==========================================
 @st.cache_data(ttl=86400)
 def load_market_data(bench_ticker="^IXIC"):
-    # 12 Activos: Los originales 10 + GLD + SGOV (ahora sin IBTA, entra TTD)
+    # 11 Activos solicitados por el usuario
     assets = ["VSAT", "PTEN", "HL", "CDE", "ICHR", "WMT", "BAX", "AVGO", "JPM", "GLD", "SGOV"]
     tkrs = assets + [bench_ticker]
     end = datetime.today()
     start = end - timedelta(days=2*365)
     data = yf.download(tkrs, start=start, end=end, progress=False)['Close'].ffill().dropna()
-    returns = np.log(data / data.shift(1)).dropna()
-    return returns, data, assets
+    
+    # Separación rigurosa: Simples para suma ponderada y Markowitz, Logarítmicos para Estocásticos
+    simple_returns = data.pct_change().dropna()
+    log_returns = np.log(data / data.shift(1)).dropna()
+    
+    return simple_returns, log_returns, data, assets
 
 def geometric_brownian_motion(S0, mu, sigma, T=1, N=252, paths=50):
     dt = T/N
@@ -85,9 +89,10 @@ def geometric_brownian_motion(S0, mu, sigma, T=1, N=252, paths=50):
 
 def hurst_exponent(ts):
     lags = range(2, min(100, len(ts)//2))
-    tau = [np.sqrt(np.std(np.subtract(ts[lag:], ts[:-lag]))) for lag in lags]
+    # Corrección matemática: Varianza escala con tau^(2H), Desviación Estándar escala con tau^H
+    tau = [np.std(np.subtract(ts[lag:], ts[:-lag])) for lag in lags]
     poly = np.polyfit(np.log(lags), np.log(tau), 1)
-    return poly[0]*2.0, lags, tau
+    return poly[0], lags, tau
 
 def lyapunov_exponent(returns):
     # Proxy ultrarrápido Divergence Rate (1D array)
@@ -105,14 +110,19 @@ with st.sidebar:
     bench_sym = "^IXIC" if bench_opt == "Nasdaq 100" else "SPY"
     
     # Sliders Dinámicos Generados por Array
-    raw_returns, price_data, asset_list = load_market_data(bench_sym)
+    simple_returns, raw_returns, price_data, asset_list = load_market_data(bench_sym)
     
     st.markdown("<div class='sub-header' style='margin-top:20px;'>Asset Weights (%)</div>", unsafe_allow_html=True)
+    
+    # Pesos específicos solicitados por el usuario
+    default_weights = {
+        "VSAT": 2.94, "PTEN": 0.57, "HL": 1.68, "CDE": 9.96, "ICHR": 0.13,
+        "WMT": 29.12, "BAX": 2.49, "AVGO": 9.43, "JPM": 9.17, "GLD": 25.06, "SGOV": 9.45
+    }
+    
     raw_weights = []
-    initial_weight = round(100.0 / len(asset_list), 2)
     for asset in asset_list:
-        # Reemplazo de st.slider por st.number_input para permitir escritura de números estricta
-        val = st.number_input(f"% {asset}", 0.0, 100.0, initial_weight, step=0.01, format="%.2f")
+        val = st.number_input(f"% {asset}", 0.0, 100.0, default_weights.get(asset, 0.0), step=0.01, format="%.2f")
         raw_weights.append(val)
         
     w_sum = sum(raw_weights)
@@ -129,9 +139,9 @@ with st.sidebar:
     st.markdown("<div class='sub-header' style='margin-top:20px;'>Riesgo Paramétrico</div>", unsafe_allow_html=True)
     r_conf = st.selectbox("Nivel de Confianza", ["90%", "95%", "99%"], index=1)
 
-# Procesamiento Cómputos Base
-port_ret = raw_returns[asset_list].dot(w_arr)
-bench_ret = raw_returns[bench_sym]
+# Procesamiento Cómputos Base (Corrección: suma lineal usa retornos simples)
+port_ret = simple_returns[asset_list].dot(w_arr)
+bench_ret = simple_returns[bench_sym]
 
 r_anual = port_ret.mean() * 252
 v_anual = port_ret.std() * np.sqrt(252)
@@ -151,7 +161,9 @@ bench_cum = (1+bench_ret).cumprod() * 100
 
 rf_d = 0.045 / 252
 downside_diff = port_ret[port_ret < rf_d] - rf_d
-down_std = np.sqrt(np.mean(downside_diff**2)) * np.sqrt(252) if len(downside_diff) > 0 else 0
+# Corrección matemática: Sortino divide varianza bajista entre el total de N días
+down_var = np.sum(downside_diff**2) / len(port_ret)
+down_std = np.sqrt(down_var) * np.sqrt(252) if len(downside_diff) > 0 else 0
 sortino = (r_anual - 0.045) / down_std if down_std > 0 else 0
 
 treynor = (r_anual - 0.045) / beta if beta != 0 else 0
@@ -233,12 +245,13 @@ with tab1:
 # TAB 2: MARKOWITZ & MONTE CARLO
 # -------------------------------------------------------------
 with tab2:
-    cc1, cc2 = st.columns([1, 1.5])
+    st.markdown("<div class='neon-title' style='font-size:20px; text-align:center;'>Topografía de Correlación</div>", unsafe_allow_html=True)
+    corr_col1, corr_col2 = st.columns(2)
     
-    with cc1:
+    with corr_col1:
         st.markdown("<div class='glass-box'>", unsafe_allow_html=True)
-        st.markdown("<div class='sub-header'>Matriz de Correlación Diaria</div>", unsafe_allow_html=True)
-        corr_matrix = raw_returns[asset_list].corr()
+        st.markdown("<div class='sub-header'>Matriz de Correlación (2D)</div>", unsafe_allow_html=True)
+        corr_matrix = simple_returns[asset_list].corr()
         fig_corr = go.Figure(data=go.Heatmap(
             z=corr_matrix.values, x=corr_matrix.columns, y=corr_matrix.index,
             colorscale=[[0, '#0f0f0f'], [0.5, C_PURP], [1.0, C_CYAN]], text=np.round(corr_matrix.values, 2), texttemplate="%{text}"
@@ -247,36 +260,109 @@ with tab2:
         fig_corr.update_layout(height=350, yaxis_autorange='reversed')
         st.plotly_chart(fig_corr, use_container_width=True)
         st.markdown("</div>", unsafe_allow_html=True)
-    
-    with cc2:
+
+    with corr_col2:
         st.markdown("<div class='glass-box'>", unsafe_allow_html=True)
-        st.markdown("<div class='sub-header'>Frontera Eficiente Estocástica (Markowitz)</div>", unsafe_allow_html=True)
+        st.markdown("<div class='sub-header'>Topografía de Correlación (3D)</div>", unsafe_allow_html=True)
+        fig_corr_3d = go.Figure(data=[go.Surface(
+            z=corr_matrix.values, x=corr_matrix.columns, y=corr_matrix.index,
+            colorscale=[[0, '#0a0a0c'], [0.5, C_PURP], [1.0, C_CYAN]], showscale=False
+        )])
+        fig_corr_3d = style_plotly(fig_corr_3d)
+        fig_corr_3d.update_layout(height=350, scene=dict(
+            xaxis=dict(showticklabels=False, title=''), yaxis=dict(showticklabels=False, title=''), zaxis=dict(title='Correlación'),
+            camera=dict(eye=dict(x=1.5, y=1.5, z=1.2))
+        ), margin=dict(l=0, r=0, b=0, t=30))
+        st.plotly_chart(fig_corr_3d, use_container_width=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown("<div class='neon-title' style='font-size:20px; text-align:center; margin-top:20px;'>Hiper-Espacio de Eficiencia</div>", unsafe_allow_html=True)
+    ef_col1, ef_col2 = st.columns(2)
+    
+    # Pre-calcular Markowitz
+    num_ports = 5000
+    p_ret = []
+    p_vol = []
+    p_sharpe = []
+    
+    cov_annual = simple_returns[asset_list].cov() * 252
+    mean_ret_annual = simple_returns[asset_list].mean() * 252
+    rf_rate = 0.045
+    
+    for _ in range(num_ports):
+        weights = np.random.random(len(asset_list))
+        weights /= np.sum(weights)
+        ret = np.dot(weights, mean_ret_annual)
+        vol = np.sqrt(np.dot(weights.T, np.dot(cov_annual, weights)))
+        p_ret.append(ret)
+        p_vol.append(vol)
+        p_sharpe.append((ret - rf_rate) / vol if vol > 0 else 0)
         
-        num_ports = 1500
-        p_ret = []
-        p_vol = []
-        cov_annual = raw_returns[asset_list].cov() * 252
-        mean_ret_annual = raw_returns[asset_list].mean() * 252
-        
-        for _ in range(num_ports):
-            weights = np.random.random(len(asset_list))
-            weights /= np.sum(weights)
-            p_ret.append(np.dot(weights, mean_ret_annual))
-            p_vol.append(np.sqrt(np.dot(weights.T, np.dot(cov_annual, weights))))
-            
+    p_ret = np.array(p_ret)
+    p_vol = np.array(p_vol)
+    p_sharpe = np.array(p_sharpe)
+    
+    idx_max_sharpe = np.argmax(p_sharpe)
+    max_vol = p_vol[idx_max_sharpe]
+    max_ret = p_ret[idx_max_sharpe]
+    
+    x_cml = np.linspace(0, max(p_vol) * 1.2, 100)
+    y_cml = rf_rate + ((max_ret - rf_rate) / max_vol) * x_cml
+
+    with ef_col1:
+        st.markdown("<div class='glass-box'>", unsafe_allow_html=True)
+        st.markdown("<div class='sub-header'>Frontera Eficiente Estocástica (2D)</div>", unsafe_allow_html=True)
         fig_ef = go.Figure()
-        fig_ef.add_trace(go.Scatter(x=p_vol, y=p_ret, mode='markers', marker=dict(color=p_ret, colorscale='PuBuGn', size=5, opacity=0.6), name="Universo Random"))
+        fig_ef.add_trace(go.Scatter(x=p_vol, y=p_ret, mode='markers', marker=dict(color=p_sharpe, colorscale='PuBuGn', size=4, opacity=0.3), name="Universo Aleatorio"))
+        
+        # Activos Individuales
+        asset_vols = np.sqrt(np.diag(cov_annual))
+        fig_ef.add_trace(go.Scatter(
+            x=asset_vols, y=mean_ret_annual, mode='markers+text',
+            text=asset_list, textposition="top center",
+            marker=dict(color=C_CYAN, size=8, symbol='circle', line=dict(color='#fff', width=1)),
+            name="Activos Individuales"
+        ))
+        
+        fig_ef.add_trace(go.Scatter(x=x_cml, y=y_cml, mode='lines', name='CML', line=dict(color='#eab308', width=2, dash='dot')))
+        fig_ef.add_trace(go.Scatter(x=[max_vol], y=[max_ret], mode='markers', marker=dict(color='#ef4444', size=12, symbol='diamond', line=dict(color='#ffffff', width=1)), name='Max Sharpe'))
         fig_ef.add_trace(go.Scatter(x=[v_anual], y=[r_anual], mode='markers', marker=dict(color=C_PINK, size=15, symbol='star', line=dict(color=C_CYAN, width=2)), name="TU PORTAFOLIO"))
+        
         fig_ef = style_plotly(fig_ef)
-        fig_ef.update_layout(height=350, xaxis_title="Riesgo (Volatilidad)", yaxis_title="Retorno Anualizado", xaxis=dict(showgrid=True, gridcolor='#222'), yaxis=dict(showgrid=True, gridcolor='#222'), showlegend=False)
+        fig_ef.update_layout(height=400, xaxis_title="Volatilidad", yaxis_title="Retorno Anualizado", xaxis=dict(showgrid=True, gridcolor='#222', rangemode='tozero'), yaxis=dict(showgrid=True, gridcolor='#222'), showlegend=True, legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01, bgcolor="rgba(0,0,0,0.5)"))
         st.plotly_chart(fig_ef, use_container_width=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with ef_col2:
+        st.markdown("<div class='glass-box'>", unsafe_allow_html=True)
+        st.markdown("<div class='sub-header'>Hiper-Espacio de Eficiencia (3D)</div>", unsafe_allow_html=True)
+        fig_ef_3d = go.Figure()
+        fig_ef_3d.add_trace(go.Scatter3d(
+            x=p_vol, y=p_ret, z=p_sharpe, mode='markers',
+            marker=dict(color=p_sharpe, colorscale='PuBuGn', size=3, opacity=0.4), name="Universo Aleatorio"
+        ))
+        fig_ef_3d.add_trace(go.Scatter3d(
+            x=[max_vol], y=[max_ret], z=[np.max(p_sharpe)], mode='markers',
+            marker=dict(color='#ef4444', size=8, symbol='diamond', line=dict(color='#ffffff', width=1)), name='Max Sharpe'
+        ))
+        fig_ef_3d.add_trace(go.Scatter3d(
+            x=[v_anual], y=[r_anual], z=[sharpe], mode='markers',
+            marker=dict(color=C_PINK, size=10, symbol='circle', line=dict(color=C_CYAN, width=2)), name="TU PORTAFOLIO"
+        ))
+        fig_ef_3d = style_plotly(fig_ef_3d)
+        fig_ef_3d.update_layout(height=400, scene=dict(
+            xaxis_title="Volatilidad", yaxis_title="Retorno", zaxis_title="Sharpe Ratio",
+            camera=dict(eye=dict(x=1.3, y=1.3, z=1.0))
+        ), margin=dict(l=0, r=0, b=0, t=10), showlegend=False)
+        st.plotly_chart(fig_ef_3d, use_container_width=True)
         st.markdown("</div>", unsafe_allow_html=True)
         
     st.markdown("<div class='glass-box'>", unsafe_allow_html=True)
     st.markdown("<div class='sub-header'>Monte Carlo Geometric Brownian Motion (Simulador de Precios)</div>", unsafe_allow_html=True)
     mc_sel = st.selectbox("Activo a Simular Futuro (1 Año, 50 Escenarios):", asset_list)
     s0 = float(price_data[mc_sel].iloc[-1])
-    ret_asset = raw_returns[mc_sel]
+    # Corrección: La fórmula de Ito en GBM compensa el drift, así que pasamos retornos simples esperados
+    ret_asset = simple_returns[mc_sel]
     mu = float(ret_asset.mean() * 252)
     sigma = float(ret_asset.std() * np.sqrt(252))
     paths = geometric_brownian_motion(s0, mu, sigma)
